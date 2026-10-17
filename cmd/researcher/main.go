@@ -91,7 +91,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("firmware sha256: %s\nextracted files: %d\nrecorded symlinks: %d\nextraction status: %s\nmanifest: %s\n", m.Firmware.SHA256, m.InventoryTotals.Files, m.InventoryTotals.Symlinks, m.ExtractionStatus, filepath.Join(*outDir, "manifest.json"))
 		return nil
-	case "reva-overview", "reva-inspect", "reva-triage", "reva-call":
+	case "reva-overview", "reva-inspect", "reva-triage", "reva-call", "reva-security-triage":
 		flags := flag.NewFlagSet("reva-overview", flag.ContinueOnError)
 		flags.SetOutput(os.Stderr)
 		session := flags.String("session", "", "directory containing the extraction manifest and extracted files")
@@ -128,6 +128,20 @@ func run(ctx context.Context, args []string) error {
 		}
 		if args[0] != "reva-call" && len(callSites) > 0 {
 			return errors.New("--callsite is only supported by reva-call")
+		}
+		if args[0] == "reva-security-triage" {
+			if *function != "" || *fullIndex || *pcodeAddress != "" {
+				return errors.New("--function, --full-index and --pcode-address are not supported by reva-security-triage")
+			}
+			report, err := reva.QuerySecurityTriage(ctx, target, *launcher, *timeout)
+			if err != nil {
+				return err
+			}
+			if err := reva.WriteSecurityTriageNew(*out, report); err != nil {
+				return err
+			}
+			fmt.Printf("component: %s\nsha256 identity verified: %t\nranked candidates: %d\ncall boundaries: %d\nstring scan complete: %t\nevidence: %s\n", target.Path, report.Overview.IdentityVerified, len(report.Candidates), len(report.CallBoundaries), report.Coverage.StringScanComplete, *out)
+			return nil
 		}
 		if args[0] == "reva-call" {
 			if *fullIndex || *function != "" || *pcodeAddress != "" {
@@ -218,6 +232,7 @@ func usage() string {
   researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--pcode-address 0xADDRESS] [--full-index] [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-triage --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
+  researcher reva-security-triage --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-call --session EXTRACTION_DIR --name ELF_BASENAME --callsite 0xADDRESS [--callsite 0xADDRESS ...] --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
 
 Ingest is offline and read-only. Extract invokes an explicitly configured
@@ -230,7 +245,10 @@ project and invokes only import-file and get-program-overview through MCP.
 reva-inspect lists one bounded page of functions by default, or up to 512 via
 --full-index (pages of 64), and optionally inspects one CFG and entry P-code. Truncation flags are
 retained. reva-triage collects bounded web-related strings and their Ghidra
-referencing functions (candidate evidence only). reva-call inspects up to four
+referencing functions (candidate evidence only). reva-security-triage
+combines string triage, up to four CFG/entry-P-code inspections and four
+CFG-selected call boundaries in one isolated ReVa session. All prioritization
+is heuristic, not vulnerability detection. reva-call inspects up to four
 operator-selected call boundaries (static candidates, not runtime proof).
 No AI, firmware execution,
 or persistent Ghidra project.`

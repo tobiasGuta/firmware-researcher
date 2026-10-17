@@ -322,6 +322,9 @@ func WriteInspectionNew(filename string, result Inspection) error {
 func WriteCallEvidenceNew(filename string, result CallEvidence) error {
 	return writeEvidenceNew(filename, result)
 }
+func WriteSecurityTriageNew(filename string, result SecurityTriage) error {
+	return writeEvidenceNew(filename, result)
+}
 func WriteTriageNew(filename string, result StringTriage) error {
 	return writeEvidenceNew(filename, result)
 }

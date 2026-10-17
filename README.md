@@ -165,3 +165,34 @@ a verified interprocedural data-flow result.
   --reva-bin "$REVA_BIN" \
   --out "$HOME/Research/IoTGoat/reva-uhttpd-call-block-01.json" --timeout 8m
 ```
+
+### Integrated bounded security-relevant triage
+
+`reva-security-triage` connects the earlier read-only ReVa steps **in one
+human-initiated, temporary Ghidra session**. After checking the extraction
+manifest, source hash and Ghidra import identity, it runs the same fixed
+web-string scan, deterministically prioritizes up to **four referencing
+functions**, obtains each function's bounded CFG (64 blocks) and entry basic
+block P-code (32 instructions / 256 operations), and correlates direct CFG
+calls to *any* string-referenced function. It inspects **at most four CFG
+call sites**, preferentially those pointing at a string-referenced function,
+using `inspect-call-boundary`. One-hop SSA tracing, network activity and
+firmware execution are not enabled.
+
+```bash
+./researcher reva-security-triage \
+  --session "$HOME/Research/IoTGoat/extraction-05" --name uhttpd \
+  --reva-bin "$REVA_BIN" \
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-security-01.json" --timeout 8m
+```
+
+The evidence file retains the complete bounded `string_scan`, deterministic
+`priority_score` and string indicators for each selected `candidate`, raw
+`function_cfg` / `entry_basic_block_pcode`, `observed_calls`,
+`call_boundaries` with **unmodified ambiguity markers**, and a `coverage`
+section showing uninspected functions, truncation and omitted call sites.
+A score is an investigation-order heuristic **not** severity or vulnerability
+confidence. Missing/unfinished observations must not be interpreted as a
+negative security finding. Any tool mismatch or malformed call target fails
+before the exclusive output file is published. The extension must provide
+`get-strings`, `get-function-cfg`, `get-pcode`, and `inspect-call-boundary`.
