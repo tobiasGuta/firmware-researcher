@@ -91,7 +91,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("firmware sha256: %s\nextracted files: %d\nrecorded symlinks: %d\nextraction status: %s\nmanifest: %s\n", m.Firmware.SHA256, m.InventoryTotals.Files, m.InventoryTotals.Symlinks, m.ExtractionStatus, filepath.Join(*outDir, "manifest.json"))
 		return nil
-	case "reva-overview", "reva-inspect":
+	case "reva-overview", "reva-inspect", "reva-triage":
 		flags := flag.NewFlagSet("reva-overview", flag.ContinueOnError)
 		flags.SetOutput(os.Stderr)
 		session := flags.String("session", "", "directory containing the extraction manifest and extracted files")
@@ -122,6 +122,20 @@ func run(ctx context.Context, args []string) error {
 		extracted := filepath.Join(target.Session, "extracted")
 		if outAbs == extracted || strings.HasPrefix(outAbs, extracted+string(filepath.Separator)) {
 			return errors.New("analysis output must be outside extracted firmware directory")
+		}
+		if args[0] == "reva-triage" {
+			if *function != "" || *fullIndex {
+				return errors.New("--function and --full-index are not supported by reva-triage")
+			}
+			evidence, err := reva.QueryStringTriage(ctx, target, *launcher, *timeout)
+			if err != nil {
+				return err
+			}
+			if err := reva.WriteTriageNew(*out, evidence); err != nil {
+				return err
+			}
+			fmt.Printf("component: %s\nsha256 identity verified: %t\nweb strings: %d\nreferencing functions: %d\ncomplete: %t\nevidence: %s\n", target.Path, evidence.Overview.IdentityVerified, evidence.MatchCount, len(evidence.ReferencingFunctions), evidence.Complete, *out)
+			return nil
 		}
 		if args[0] == "reva-inspect" {
 			inspection, err := reva.QueryInspection(ctx, target, *launcher, *function, *timeout, *fullIndex)
@@ -164,6 +178,7 @@ func usage() string {
   researcher extract --firmware IMAGE --out-dir NEW_DIRECTORY [--image IMAGE] [--timeout 3m]
   researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--full-index] [--reva-bin mcp-reva] [--timeout 5m]
+  researcher reva-triage --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
 
 Ingest is offline and read-only. Extract invokes an explicitly configured
 local Docker image containing pinned Binwalk v3.1.0. Extraction is non-recursive,
@@ -174,5 +189,7 @@ ReVa overview imports one manifest-verified ELF into a disposable local Ghidra
 project and invokes only import-file and get-program-overview through MCP.
 reva-inspect lists one bounded page of functions by default, or up to 512 via
 --full-index (pages of 64), and optionally inspects one CFG and entry P-code. Truncation flags are
-retained. No AI, firmware execution, or persistent Ghidra project.`
+retained. reva-triage collects bounded web-related strings and their Ghidra
+referencing functions (candidate evidence only). No AI, firmware execution,
+or persistent Ghidra project.`
 }

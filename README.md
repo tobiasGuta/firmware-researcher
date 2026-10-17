@@ -125,3 +125,24 @@ claim that the index count equals Ghidra's overview function count.
 Review the function names and addresses in `function_index.functions`, then
 select an identified application function with `--function` for bounded CFG
 and basic-block P-code. PLT stubs alone are not application logic.
+
+### Evidence-based string-to-function triage
+
+The `reva-triage` command performs a single, human-initiated ReVa import in a
+disposable Ghidra project after manifest and imported-file SHA-256 verification.
+It queries read-only `get-strings` with a fixed web-protocol regex and includes
+Ghidra's referencing-function candidates. It retrieves up to 128 matches in
+pages of 32, validates pagination and response bounds, and records `complete`
+and `truncated`. Candidate addresses are derived from actual Ghidra references;
+absence of a match or reference is **not** proof of absent behavior.
+
+```bash
+./researcher reva-triage \
+  --session "$HOME/Research/IoTGoat/extraction-05" --name uhttpd \
+  --reva-bin "$REVA_BIN" \
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-triage-01.json" --timeout 8m
+```
+
+Inspect `referencing_functions` for an address to pass to `reva-inspect --function`. This tool does not assert that a candidate handles HTTP requests
+or that a vulnerability exists; it has no access to execution or arbitrary MCP
+functions. Strings without direct Ghidra references remain included as evidence.

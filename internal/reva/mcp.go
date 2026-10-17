@@ -89,7 +89,10 @@ func (c *client) request(method string, params any) (json.RawMessage, error) {
 func (c *client) notify(method string) error {
 	return c.encoder.Encode(rpcMessage{JSONRPC: "2.0", Method: method})
 }
-func (c *client) tool(name string, args any) (map[string]json.RawMessage, error) {
+
+// toolPayload accepts ReVa tool results as either objects or arrays. ReVa's
+// get-strings returns [pagination, ...items] instead of an object.
+func (c *client) toolPayload(name string, args any) (json.RawMessage, error) {
 	raw, err := c.request("tools/call", map[string]any{"name": name, "arguments": args})
 	if err != nil {
 		return nil, err
@@ -104,11 +107,33 @@ func (c *client) tool(name string, args any) (map[string]json.RawMessage, error)
 	if len(m.Content) != 1 || m.Content[0].Type != "text" {
 		return nil, fmt.Errorf("unexpected %s content", name)
 	}
+	payload := json.RawMessage(m.Content[0].Text)
+	if !json.Valid(payload) {
+		return nil, fmt.Errorf("invalid JSON in %s", name)
+	}
+	return payload, nil
+}
+func (c *client) tool(name string, args any) (map[string]json.RawMessage, error) {
+	raw, err := c.toolPayload(name, args)
+	if err != nil {
+		return nil, err
+	}
 	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(m.Content[0].Text), &obj); err != nil {
-		return nil, fmt.Errorf("invalid JSON in %s: %w", name, err)
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return nil, fmt.Errorf("expected JSON object in %s", name)
 	}
 	return obj, nil
+}
+func (c *client) toolArray(name string, args any) ([]json.RawMessage, error) {
+	raw, err := c.toolPayload(name, args)
+	if err != nil {
+		return nil, err
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil || items == nil {
+		return nil, fmt.Errorf("expected JSON array in %s", name)
+	}
+	return items, nil
 }
 func limitedToolText(m mcpResult) string {
 	var b strings.Builder
@@ -292,6 +317,9 @@ func WriteNew(filename string, result Overview) error {
 }
 
 func WriteInspectionNew(filename string, result Inspection) error {
+	return writeEvidenceNew(filename, result)
+}
+func WriteTriageNew(filename string, result StringTriage) error {
 	return writeEvidenceNew(filename, result)
 }
 
