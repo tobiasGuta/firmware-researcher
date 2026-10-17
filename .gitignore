@@ -1,0 +1,7 @@
+# Generated research sessions and local build outputs
+/sessions/
+/reports/
+/bin/
+*.test
+*.out
+.DS_Store
