@@ -14,6 +14,7 @@ import (
 
 	"github.com/tobiasGuta/firmware-researcher/internal/extract"
 	"github.com/tobiasGuta/firmware-researcher/internal/ingest"
+	"github.com/tobiasGuta/firmware-researcher/internal/reva"
 )
 
 func main() {
@@ -90,6 +91,45 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("firmware sha256: %s\nextracted files: %d\nrecorded symlinks: %d\nextraction status: %s\nmanifest: %s\n", m.Firmware.SHA256, m.InventoryTotals.Files, m.InventoryTotals.Symlinks, m.ExtractionStatus, filepath.Join(*outDir, "manifest.json"))
 		return nil
+	case "reva-overview":
+		flags := flag.NewFlagSet("reva-overview", flag.ContinueOnError)
+		flags.SetOutput(os.Stderr)
+		session := flags.String("session", "", "directory containing the extraction manifest and extracted files")
+		name := flags.String("name", "", "unique inventoried ELF basename, e.g. uhttpd")
+		out := flags.String("out", "", "new JSON evidence output (required, never overwritten)")
+		launcher := flags.String("reva-bin", "mcp-reva", "trusted local mcp-reva executable")
+		timeout := flags.Duration("timeout", 5*time.Minute, "ReVa session deadline (1s-15m)")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if len(flags.Args()) != 0 {
+			return errors.New("unexpected positional arguments")
+		}
+		if *out == "" {
+			return errors.New("--out is required")
+		}
+		target, err := reva.Select(*session, *name)
+		if err != nil {
+			return err
+		}
+		// Never write analysis artifacts inside the extracted firmware tree.
+		outAbs, err := filepath.Abs(*out)
+		if err != nil {
+			return err
+		}
+		extracted := filepath.Join(target.Session, "extracted")
+		if outAbs == extracted || strings.HasPrefix(outAbs, extracted+string(filepath.Separator)) {
+			return errors.New("analysis output must be outside extracted firmware directory")
+		}
+		evidence, err := reva.Query(ctx, target, *launcher, *timeout)
+		if err != nil {
+			return err
+		}
+		if err = reva.WriteNew(*out, evidence); err != nil {
+			return err
+		}
+		fmt.Printf("component: %s\narchitecture: %s\nsha256 identity verified: %t\nReVa program: %s\nevidence: %s\n", target.Path, target.Architecture, evidence.IdentityVerified, evidence.ReVaProgramPath, *out)
+		return nil
 	default:
 		return errors.New(usage())
 	}
@@ -99,10 +139,14 @@ func usage() string {
 	return `Usage:
   researcher ingest --firmware IMAGE --out MANIFEST.json [--extracted DIRECTORY]
   researcher extract --firmware IMAGE --out-dir NEW_DIRECTORY [--image IMAGE] [--timeout 3m]
+  researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
 
 Ingest is offline and read-only. Extract invokes an explicitly configured
 local Docker image containing pinned Binwalk v3.1.0. Extraction is non-recursive,
 network-disabled, resource-limited, and inventories output without running any
 extracted firmware. Requires a trusted Docker daemon and operator-owned paths.
-An extractor's successful exit does not prove complete coverage of firmware.`
+An extractor's successful exit does not prove complete coverage of firmware.
+ReVa overview imports one manifest-verified ELF into a disposable local Ghidra
+project and invokes only import-file and get-program-overview through MCP.
+It does not run firmware, grant an AI direct tool access, or retain the project.`
 }

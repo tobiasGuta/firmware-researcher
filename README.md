@@ -63,3 +63,21 @@ The inventory API does not defend against a hostile, concurrent host process swa
 ## Next milestone
 
 Validate the real IoTGoat run and its recovered filesystem and evaluate the limits. Once repeatable, connect selected ELF files through a read-only, allowlisted ReVa adapter. AI comes after deterministic analysis.
+
+## ReVa first ARM integration (development, unverified on real Ghidra)
+
+`reva-overview` is a narrow, operator-initiated adapter. It selects **one unique ELF basename** from a successful extracted-session manifest, rechecks its bytes against the recorded SHA-256, and starts a trusted local `mcp-reva` in a disposable Ghidra project. Only two MCP tools are invoked: `import-file` (mutates the **disposable Ghidra project**, not the ELF), then the read-only `get-program-overview` tool from the ReVa static-analysis expansion. It rejects absent/mismatched Ghidra SHA-256 and never calls PyGhidra scripts, shells, or arbitrary tools. No AI model is connected.
+
+This requires your separately installed and verified **development ReVa expansion** (with `get-program-overview`), a working headless `mcp-reva` executable, and `GHIDRA_INSTALL_DIR` pointing at the intended Ghidra installation. Do not modify your stable Ghidra or persistent ReVa workspace to test this integration.
+
+```bash
+export GHIDRA_INSTALL_DIR=/path/to/verified/development/ghidra
+command -v mcp-reva # must resolve to your verified development environment
+./researcher reva-overview \
+  --session "$HOME/Research/IoTGoat/extraction-05" \
+  --name uhttpd \
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-overview-01.json" \
+  --timeout 8m
+```
+
+To use a development virtualenv without changing PATH, pass `--reva-bin /absolute/path/to/venv/bin/mcp-reva`. Each run creates and cleans up a temporary headless Ghidra project. If the target's filename is ambiguous or the ReVa extension isn't installed in that environment, it fails closed. Overview evidence records hashes and returned Ghidra metadata but **does not prove security vulnerabilities or validate ARM data-flow capabilities**. A real ARM/Ghidra smoke test remains required before adding CFG/P-code investigations.
