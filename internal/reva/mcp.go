@@ -130,25 +130,36 @@ func getString(obj map[string]json.RawMessage, key string) string {
 	return value
 }
 
-// Query uses only two fixed ReVa operations. Import writes to a disposable
-// Ghidra *project*, never to firmware bytes. No AI or arbitrary ReVa scripts.
+// Query preserves the original two-tool overview workflow.
 func Query(ctx context.Context, target Target, launcher string, timeout time.Duration) (Overview, error) {
+	var overview Overview
+	err := withSession(ctx, target, launcher, timeout, func(_ *client, result Overview) error {
+		overview = result
+		return nil
+	})
+	return overview, err
+}
+
+// withSession starts a disposable Ghidra project and verifies identity before
+// authorizing a narrowly scoped read-only operation. The caller never receives
+// a live client after this function returns.
+func withSession(ctx context.Context, target Target, launcher string, timeout time.Duration, visit func(*client, Overview) error) error {
 	if timeout < time.Second || timeout > 15*time.Minute {
-		return Overview{}, errors.New("timeout must be 1s to 15m")
+		return errors.New("timeout must be 1s to 15m")
 	}
 	if launcher == "" {
 		launcher = "mcp-reva"
 	}
 	bin, err := exec.LookPath(launcher)
 	if err != nil {
-		return Overview{}, fmt.Errorf("mcp-reva executable unavailable: %w", err)
+		return fmt.Errorf("mcp-reva executable unavailable: %w", err)
 	}
 	if _, ok := os.LookupEnv("GHIDRA_INSTALL_DIR"); !ok {
-		return Overview{}, errors.New("GHIDRA_INSTALL_DIR must point to the isolated Ghidra/ReVa installation")
+		return errors.New("GHIDRA_INSTALL_DIR must point to the isolated Ghidra/ReVa installation")
 	}
 	projectDir, err := os.MkdirTemp("", "firmware-researcher-reva-")
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	defer os.RemoveAll(projectDir)
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -158,16 +169,16 @@ func Query(ctx context.Context, target Target, launcher string, timeout time.Dur
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 	in, err := cmd.StdinPipe()
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	var stderr cappedText
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
-		return Overview{}, err
+		return err
 	}
 	defer func() {
 		_ = in.Close()
@@ -179,20 +190,20 @@ func Query(ctx context.Context, target Target, launcher string, timeout time.Dur
 	c := newClient(out, in)
 	initialize, err := c.request("initialize", map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "firmware-researcher", "version": "0.1.0"}})
 	if err != nil {
-		return Overview{}, fmt.Errorf("initialize ReVa: %w: %s", err, stderr.String())
+		return fmt.Errorf("initialize ReVa: %w: %s", err, stderr.String())
 	}
 	var info struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	if err := json.Unmarshal(initialize, &info); err != nil || info.ProtocolVersion == "" {
-		return Overview{}, errors.New("MCP protocol negotiation failed")
+		return errors.New("MCP protocol negotiation failed")
 	}
 	if err := c.notify("notifications/initialized"); err != nil {
-		return Overview{}, err
+		return err
 	}
 	list, err := c.request("tools/list", map[string]any{})
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	var catalog struct {
 		Tools []struct {
@@ -200,18 +211,18 @@ func Query(ctx context.Context, target Target, launcher string, timeout time.Dur
 		} `json:"tools"`
 	}
 	if err := json.Unmarshal(list, &catalog); err != nil {
-		return Overview{}, err
+		return err
 	}
 	available := map[string]bool{}
 	for _, tool := range catalog.Tools {
 		available[tool.Name] = true
 	}
 	if !available["import-file"] || !available["get-program-overview"] {
-		return Overview{}, errors.New("required ReVa tools absent; verify development extension is installed")
+		return errors.New("required ReVa tools absent; verify development extension is installed")
 	}
 	imported, err := c.tool("import-file", map[string]any{"path": target.LocalPath, "destinationFolder": "/", "analyzeAfterImport": true, "enableVersionControl": false})
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	var imp struct {
 		Success  bool     `json:"success"`
@@ -219,32 +230,44 @@ func Query(ctx context.Context, target Target, launcher string, timeout time.Dur
 	}
 	raw, _ := json.Marshal(imported)
 	if err := json.Unmarshal(raw, &imp); err != nil || !imp.Success || len(imp.Programs) != 1 || imp.Programs[0] == "" {
-		return Overview{}, errors.New("ReVa import failed or returned ambiguous program paths")
+		return errors.New("ReVa import failed or returned ambiguous program paths")
 	}
 	result, err := c.tool("get-program-overview", map[string]any{"programPath": imp.Programs[0], "maxBlocks": 32, "maxEntryPoints": 32})
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	importedSHA := getString(result, "sha256")
 	if importedSHA == "" || !strings.EqualFold(importedSHA, target.SHA256) {
-		return Overview{}, fmt.Errorf("Ghidra import identity mismatch: expected %s, received %s", target.SHA256, importedSHA)
+		return fmt.Errorf("Ghidra import identity mismatch: expected %s, received %s", target.SHA256, importedSHA)
 	}
 	if returned := getString(result, "programPath"); returned != "" && returned != imp.Programs[0] {
-		return Overview{}, errors.New("ReVa overview belongs to a different program")
+		return errors.New("ReVa overview belongs to a different program")
 	}
 	// Ensure source bytes remain unchanged after the external analysis tool ran.
 	afterHash, afterSize, err := digest(target.LocalPath, ingestMaxFileBytes)
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
 	if afterHash != target.SHA256 || afterSize != target.Size {
-		return Overview{}, errors.New("firmware component changed during ReVa analysis")
+		return errors.New("firmware component changed during ReVa analysis")
 	}
 	overviewJSON, err := json.Marshal(result)
 	if err != nil {
-		return Overview{}, err
+		return err
 	}
-	return Overview{SchemaVersion: 1, Target: target, ReVaProgramPath: imp.Programs[0], ReVaOverview: overviewJSON, GhidraSHA256: importedSHA, IdentityVerified: true}, nil
+	verified := Overview{SchemaVersion: 1, Target: target, ReVaProgramPath: imp.Programs[0], ReVaOverview: overviewJSON, GhidraSHA256: importedSHA, IdentityVerified: true}
+	if err := visit(c, verified); err != nil {
+		return err
+	}
+	// Verify the source again after optional function analysis too.
+	endHash, endSize, err := digest(target.LocalPath, ingestMaxFileBytes)
+	if err != nil {
+		return err
+	}
+	if endHash != target.SHA256 || endSize != target.Size {
+		return errors.New("firmware component changed during ReVa operation")
+	}
+	return nil
 }
 
 // Standalone cap avoids leaking unlimited stderr from a local tool.
@@ -265,6 +288,14 @@ func (b *cappedText) Write(p []byte) (int, error) {
 const ingestMaxFileBytes int64 = 512 << 20
 
 func WriteNew(filename string, result Overview) error {
+	return writeEvidenceNew(filename, result)
+}
+
+func WriteInspectionNew(filename string, result Inspection) error {
+	return writeEvidenceNew(filename, result)
+}
+
+func writeEvidenceNew(filename string, result any) error {
 	if filename == "" {
 		return errors.New("output filename required")
 	}

@@ -81,3 +81,27 @@ command -v mcp-reva # must resolve to your verified development environment
 ```
 
 To use a development virtualenv without changing PATH, pass `--reva-bin /absolute/path/to/venv/bin/mcp-reva`. Each run creates and cleans up a temporary headless Ghidra project. If the target's filename is ambiguous or the ReVa extension isn't installed in that environment, it fails closed. Overview evidence records hashes and returned Ghidra metadata but **does not prove security vulnerabilities or validate ARM data-flow capabilities**. A real ARM/Ghidra smoke test remains required before adding CFG/P-code investigations.
+
+## Bounded ReVa function inspection
+
+After the initial ARM `reva-overview` smoke test passes, list the first page
+of analyzed function candidates without invoking deeper analysis:
+
+```bash
+./researcher reva-inspect \
+  --session "$HOME/Research/IoTGoat/extraction-05" --name uhttpd \
+  --reva-bin /mnt/Development/Tools/ReVa-Static-Analysis/.venv-reva-py313/bin/mcp-reva \
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-functions-01.json" --timeout 8m
+```
+
+The `function_index` field records one page of up to **64** functions, with
+`totalCount` and `nextStartIndex` from ReVa. This is not the entire index.
+Review the returned function names/addresses and then run another session with
+`--function EXACT_FUNCTION_NAME` and a **new** `--out` filename. That adds a
+CFG limited to 64 basic blocks and a raw P-code entry basic block excerpt
+limited to 32 instructions / 256 operations. Both reports preserve their
+`truncated` flags; incomplete views must not be treated as complete coverage.
+Function analysis uses only the read-only `get-functions`, `get-function-cfg`
+and `get-pcode` MCP tools after the same verified import and overview checks.
+It doesn't decompile the whole executable, exercise the target, or identify
+vulnerabilities by itself. The Ghidra project remains disposable.

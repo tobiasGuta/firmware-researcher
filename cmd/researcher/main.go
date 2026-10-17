@@ -91,7 +91,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("firmware sha256: %s\nextracted files: %d\nrecorded symlinks: %d\nextraction status: %s\nmanifest: %s\n", m.Firmware.SHA256, m.InventoryTotals.Files, m.InventoryTotals.Symlinks, m.ExtractionStatus, filepath.Join(*outDir, "manifest.json"))
 		return nil
-	case "reva-overview":
+	case "reva-overview", "reva-inspect":
 		flags := flag.NewFlagSet("reva-overview", flag.ContinueOnError)
 		flags.SetOutput(os.Stderr)
 		session := flags.String("session", "", "directory containing the extraction manifest and extracted files")
@@ -99,6 +99,7 @@ func run(ctx context.Context, args []string) error {
 		out := flags.String("out", "", "new JSON evidence output (required, never overwritten)")
 		launcher := flags.String("reva-bin", "mcp-reva", "trusted local mcp-reva executable")
 		timeout := flags.Duration("timeout", 5*time.Minute, "ReVa session deadline (1s-15m)")
+		function := flags.String("function", "", "optional exact Ghidra function name or entry address (reva-inspect only)")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -121,6 +122,24 @@ func run(ctx context.Context, args []string) error {
 		if outAbs == extracted || strings.HasPrefix(outAbs, extracted+string(filepath.Separator)) {
 			return errors.New("analysis output must be outside extracted firmware directory")
 		}
+		if args[0] == "reva-inspect" {
+			inspection, err := reva.QueryInspection(ctx, target, *launcher, *function, *timeout)
+			if err != nil {
+				return err
+			}
+			if err := reva.WriteInspectionNew(*out, inspection); err != nil {
+				return err
+			}
+			fmt.Printf("component: %s\nsha256 identity verified: %t\nfunction page limit: 64\n", target.Path, inspection.Overview.IdentityVerified)
+			if *function != "" {
+				fmt.Printf("inspected function: %s\n", *function)
+			}
+			fmt.Printf("evidence: %s\n", *out)
+			return nil
+		}
+		if *function != "" {
+			return errors.New("--function requires reva-inspect")
+		}
 		evidence, err := reva.Query(ctx, target, *launcher, *timeout)
 		if err != nil {
 			return err
@@ -140,6 +159,7 @@ func usage() string {
   researcher ingest --firmware IMAGE --out MANIFEST.json [--extracted DIRECTORY]
   researcher extract --firmware IMAGE --out-dir NEW_DIRECTORY [--image IMAGE] [--timeout 3m]
   researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
+  researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--reva-bin mcp-reva] [--timeout 5m]
 
 Ingest is offline and read-only. Extract invokes an explicitly configured
 local Docker image containing pinned Binwalk v3.1.0. Extraction is non-recursive,
@@ -148,5 +168,7 @@ extracted firmware. Requires a trusted Docker daemon and operator-owned paths.
 An extractor's successful exit does not prove complete coverage of firmware.
 ReVa overview imports one manifest-verified ELF into a disposable local Ghidra
 project and invokes only import-file and get-program-overview through MCP.
-It does not run firmware, grant an AI direct tool access, or retain the project.`
+reva-inspect additionally lists one bounded page of functions and optionally
+inspects one CFG and one entry basic block of raw P-code. Truncation flags are
+retained. No AI, firmware execution, or persistent Ghidra project.`
 }
