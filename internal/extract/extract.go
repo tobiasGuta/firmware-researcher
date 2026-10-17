@@ -42,6 +42,7 @@ type Options struct {
 
 type Runner interface {
 	Run(ctx context.Context, args ...string) (string, string, error)
+	Export(ctx context.Context, name, dest string) error
 }
 
 type Docker struct{}
@@ -190,26 +191,18 @@ func RunWith(ctx context.Context, opts Options, docker Runner) (ingest.Manifest,
 	if status != 0 {
 		return ingest.Manifest{}, fmt.Errorf("binwalk exited with code %d: %s", status, workerDiagnostics(stdout, stderr, nil))
 	}
-	// Collect Binwalk's signature log before exporting extracted files.
-	// A missing extraction directory is a normal possible outcome, and we
-	// need the scanner's diagnostics to distinguish it from a copy failure.
-	if _, e, err := docker.Run(workerCtx, "cp", name+":/scratch/binwalk.json", filepath.Join(stage, "binwalk.json")); err != nil {
-		return ingest.Manifest{}, fmt.Errorf("binwalk JSON provenance unavailable: %v: %s; %s", err, e, workerDiagnostics(stdout, stderr, nil))
+	// Docker cp cannot read tmpfs mount contents. Stream an allowlisted
+	// archive from inside the running container and validate on receipt.
+	if err := docker.Export(workerCtx, name, stage); err != nil {
+		return ingest.Manifest{}, fmt.Errorf("Binwalk tmpfs export failed: %w; %s", err, workerDiagnostics(stdout, stderr, nil))
 	}
 	logInfo, err := os.Lstat(filepath.Join(stage, "binwalk.json"))
 	if err != nil || !logInfo.Mode().IsRegular() || logInfo.Size() > maxSignatureLogBytes {
 		return ingest.Manifest{}, errors.New("binwalk JSON provenance absent, non-regular or oversized")
 	}
-	binwalkLog, err := os.ReadFile(filepath.Join(stage, "binwalk.json"))
-	if err != nil {
-		return ingest.Manifest{}, fmt.Errorf("read binwalk signature log: %w", err)
-	}
 	extracted := filepath.Join(stage, "extracted")
-	if err = os.Mkdir(extracted, 0700); err != nil {
-		return ingest.Manifest{}, err
-	}
-	if _, e, err := docker.Run(workerCtx, "cp", name+":/scratch/extracted/.", extracted); err != nil {
-		return ingest.Manifest{}, fmt.Errorf("cannot export extracted files: %v: %s; %s", err, e, workerDiagnostics(stdout, stderr, binwalkLog))
+	if st, err := os.Lstat(extracted); err != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return ingest.Manifest{}, errors.New("extracted directory absent or unsafe")
 	}
 	if err = os.WriteFile(filepath.Join(stage, "stdout.log"), []byte(stdout), 0600); err != nil {
 		return ingest.Manifest{}, err

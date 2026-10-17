@@ -38,40 +38,25 @@ func (f *fakeDocker) Run(_ context.Context, args ...string) (string, string, err
 		return "signature found\n", "diagnostics\n", nil
 	case "inspect":
 		return "true 0\n", "", nil
-	case "cp":
-		if len(args) != 3 {
-			panic("bad cp arguments")
-		}
-		if strings.HasSuffix(args[1], "/scratch/extracted/.") {
-			if f.noFiles {
-				return "", "Could not find the file /scratch/extracted/. in container", errors.New("exit status 1")
-			}
-			root := args[2]
-			if err := os.MkdirAll(filepath.Join(root, "squashfs-root/bin"), 0700); err != nil {
-				return "", "", err
-			}
-			if err := os.WriteFile(filepath.Join(root, "squashfs-root/bin/busybox"), []byte("ELF example"), 0600); err != nil {
-				return "", "", err
-			}
-			if err := os.Symlink("/bin/busybox", filepath.Join(root, "squashfs-root/bin/ash")); err != nil {
-				return "", "", err
-			}
-			if err := os.Symlink("../../../../etc/passwd", filepath.Join(root, "squashfs-root/bin/escape")); err != nil {
-				return "", "", err
-			}
-		} else if strings.HasSuffix(args[1], "/scratch/binwalk.json") {
-			if err := os.WriteFile(args[2], []byte(`{"results":[]}`), 0600); err != nil {
-				return "", "", err
-			}
-		} else {
-			panic("unexpected cp source: " + args[1])
-		}
-		return "", "", nil
 	case "rm":
 		return "", "", nil
 	default:
 		panic("unexpected docker command: " + args[0])
 	}
+}
+
+
+func (f *fakeDocker) Export(_ context.Context, name, dest string) error {
+	f.calls = append(f.calls, []string{"export", name})
+	if f.failOn == "export" || f.noFiles {
+		return errors.New("simulated tmpfs export failure")
+	}
+	root := filepath.Join(dest, "extracted", "squashfs-root", "bin")
+	if err := os.MkdirAll(root, 0700); err != nil { return err }
+	if err := os.WriteFile(filepath.Join(root, "busybox"), []byte("ELF example"), 0600); err != nil { return err }
+	if err := os.Symlink("/bin/busybox", filepath.Join(root, "ash")); err != nil { return err }
+	if err := os.Symlink("../../../../etc/passwd", filepath.Join(root, "escape")); err != nil { return err }
+	return os.WriteFile(filepath.Join(dest, "binwalk.json"), []byte(`{"results":[]}`), 0600)
 }
 
 func setup(t *testing.T) (string, string) {
@@ -111,8 +96,8 @@ func TestExtractEndToEndWithFakeDocker(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dest, "firmware.img")); !os.IsNotExist(err) {
 		t.Fatal("firmware staging copy persisted")
 	}
-	if len(fake.calls) != 9 {
-		t.Fatalf("expected image/create/start/exec/inspect/logs/cp/cp/rm; got %d: %+v", len(fake.calls), fake.calls)
+	if len(fake.calls) != 8 {
+		t.Fatalf("expected image/create/start/exec/inspect/logs/export/rm; got %d: %+v", len(fake.calls), fake.calls)
 	}
 	create := strings.Join(fake.calls[1], " ")
 	for _, want := range []string{"--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64", "--memory=1536m", "--tmpfs=/scratch:rw", "--user ", ":/analysis/firmware.img:ro,Z", "--extract", "--threads=2", "--entrypoint=/bin/sh", "--log-driver=local"} {
@@ -134,7 +119,7 @@ func TestExtractEndToEndWithFakeDocker(t *testing.T) {
 }
 
 func TestFailuresFailClosedAndCleanup(t *testing.T) {
-	for _, which := range []string{"image", "create", "start", "cp"} {
+	for _, which := range []string{"image", "create", "start", "export"} {
 		t.Run(which, func(t *testing.T) {
 			firmware, dest := setup(t)
 			f := &fakeDocker{failOn: which}
@@ -145,7 +130,7 @@ func TestFailuresFailClosedAndCleanup(t *testing.T) {
 			if _, err := os.Lstat(dest); !os.IsNotExist(err) {
 				t.Fatal("published failed extraction")
 			}
-			if which == "start" || which == "cp" {
+			if which == "start" || which == "export" {
 				if f.calls[len(f.calls)-1][0] != "rm" {
 					t.Fatal("container not removed")
 				}
@@ -154,27 +139,18 @@ func TestFailuresFailClosedAndCleanup(t *testing.T) {
 	}
 }
 
-func TestMissingExtractionReportsBinwalkEvidenceAndCleansUp(t *testing.T) {
+func TestMissingExportFailsClosedAndCleansUp(t *testing.T) {
 	firmware, dest := setup(t)
 	f := &fakeDocker{noFiles: true}
 	_, err := RunWith(context.Background(), Options{Firmware: firmware, OutputDir: dest}, f)
-	if err == nil {
-		t.Fatal("missing extraction incorrectly succeeded")
-	}
-	msg := err.Error()
-	for _, want := range []string{"cannot export extracted files", "signature found", "diagnostics", "results", "Could not find the file"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("missing diagnostic %q from: %s", want, msg)
-		}
+	if err == nil || !strings.Contains(err.Error(), "Binwalk tmpfs export failed") {
+		t.Fatalf("missing export unexpectedly succeeded: %v", err)
 	}
 	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
-		t.Fatal("failed extraction published a session")
+		t.Fatal("failed session was published")
 	}
-	if f.calls[len(f.calls)-1][0] != "rm" {
-		t.Fatal("failed extraction did not clean up container")
-	}
-	if !strings.HasSuffix(f.calls[6][1], "/scratch/binwalk.json") || !strings.HasSuffix(f.calls[7][1], "/scratch/extracted/.") {
-		t.Fatal("expected Binwalk diagnostics to be collected before extraction copy")
+	if f.calls[len(f.calls)-1][0] != "rm" || f.calls[len(f.calls)-2][0] != "export" {
+		t.Fatalf("expected export followed by cleanup, got: %+v", f.calls)
 	}
 }
 
