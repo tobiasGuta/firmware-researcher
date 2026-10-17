@@ -91,7 +91,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("firmware sha256: %s\nextracted files: %d\nrecorded symlinks: %d\nextraction status: %s\nmanifest: %s\n", m.Firmware.SHA256, m.InventoryTotals.Files, m.InventoryTotals.Symlinks, m.ExtractionStatus, filepath.Join(*outDir, "manifest.json"))
 		return nil
-	case "reva-overview", "reva-inspect", "reva-triage":
+	case "reva-overview", "reva-inspect", "reva-triage", "reva-call":
 		flags := flag.NewFlagSet("reva-overview", flag.ContinueOnError)
 		flags.SetOutput(os.Stderr)
 		session := flags.String("session", "", "directory containing the extraction manifest and extracted files")
@@ -101,6 +101,8 @@ func run(ctx context.Context, args []string) error {
 		timeout := flags.Duration("timeout", 5*time.Minute, "ReVa session deadline (1s-15m)")
 		function := flags.String("function", "", "optional exact Ghidra function name or entry address (reva-inspect only)")
 		fullIndex := flags.Bool("full-index", false, "collect up to 512 functions in pages of 64 (reva-inspect only)")
+		var callSites callsiteFlags
+		flags.Var(&callSites, "callsite", "machine call instruction address (repeat up to 4, reva-call only)")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -122,6 +124,19 @@ func run(ctx context.Context, args []string) error {
 		extracted := filepath.Join(target.Session, "extracted")
 		if outAbs == extracted || strings.HasPrefix(outAbs, extracted+string(filepath.Separator)) {
 			return errors.New("analysis output must be outside extracted firmware directory")
+		}
+		if args[0] != "reva-call" && len(callSites) > 0 {
+			return errors.New("--callsite is only supported by reva-call")
+		}
+		if args[0] == "reva-call" {
+			if *fullIndex || *function != "" {
+				return errors.New("--full-index and --function are not supported by reva-call")
+			}
+			evidence, err := reva.QueryCallEvidence(ctx, target, *launcher, callSites, *timeout)
+			if err != nil { return err }
+			if err := reva.WriteCallEvidenceNew(*out, evidence); err != nil { return err }
+			fmt.Printf("component: %s\nsha256 identity verified: %t\ncall sites: %d\nevidence: %s\n", target.Path, evidence.Overview.IdentityVerified, len(evidence.Boundaries), *out)
+			return nil
 		}
 		if args[0] == "reva-triage" {
 			if *function != "" || *fullIndex {
@@ -172,6 +187,17 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
+// callsiteFlags is a small operator-provided set; validation is fail-closed
+// before the disposable Ghidra project starts.
+type callsiteFlags []string
+
+func (f *callsiteFlags) String() string { return strings.Join(*f, ",") }
+func (f *callsiteFlags) Set(value string) error {
+	if len(*f) >= 4 { return errors.New("at most four --callsite values") }
+	*f = append(*f, value)
+	return nil
+}
+
 func usage() string {
 	return `Usage:
   researcher ingest --firmware IMAGE --out MANIFEST.json [--extracted DIRECTORY]
@@ -179,6 +205,7 @@ func usage() string {
   researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--full-index] [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-triage --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
+  researcher reva-call --session EXTRACTION_DIR --name ELF_BASENAME --callsite 0xADDRESS [--callsite 0xADDRESS ...] --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
 
 Ingest is offline and read-only. Extract invokes an explicitly configured
 local Docker image containing pinned Binwalk v3.1.0. Extraction is non-recursive,
@@ -190,6 +217,8 @@ project and invokes only import-file and get-program-overview through MCP.
 reva-inspect lists one bounded page of functions by default, or up to 512 via
 --full-index (pages of 64), and optionally inspects one CFG and entry P-code. Truncation flags are
 retained. reva-triage collects bounded web-related strings and their Ghidra
-referencing functions (candidate evidence only). No AI, firmware execution,
+referencing functions (candidate evidence only). reva-call inspects up to four
+operator-selected call boundaries (static candidates, not runtime proof).
+No AI, firmware execution,
 or persistent Ghidra project.`
 }

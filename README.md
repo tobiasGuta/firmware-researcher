@@ -146,3 +146,25 @@ absence of a match or reference is **not** proof of absent behavior.
 Inspect `referencing_functions` for an address to pass to `reva-inspect --function`. This tool does not assert that a candidate handles HTTP requests
 or that a vulnerability exists; it has no access to execution or arbitrary MCP
 functions. Strings without direct Ghidra references remain included as evidence.
+
+
+### Bounded operator-selected ReVa call boundaries
+
+\`reva-call\` verifies the extracted ELF against its manifest and Ghidra import
+hash, then requests only \`inspect-call-boundary\` for 1–4 explicit machine
+callsite addresses in one disposable ReVa session. Results retain the raw
+Ghidra High P-code arguments, target classification, callee return-site
+models, ambiguity and truncation metadata. These observations are *candidate*
+decompiler facts, not proven runtime argument mapping, execution, or flaws.
+
+\`\`\`bash
+./researcher reva-call \
+  --session "$HOME/Research/IoTGoat/extraction-05" --name uhttpd \
+  --reva-bin "$REVA_BIN" \
+  --callsite 0x00014e9c --callsite 0x00014f18 \
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-calls-01.json" --timeout 8m
+\`\`\`
+
+The selected sites come from the observed \`FUN_00014e8c\` CFG. No AI,
+unbounded lookup, arbitrary MCP tool access, target execution, or persistent
+Ghidra project is introduced.
