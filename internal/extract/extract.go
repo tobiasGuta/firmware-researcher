@@ -177,19 +177,26 @@ func RunWith(ctx context.Context, opts Options, docker Runner) (ingest.Manifest,
 	if strings.TrimSpace(state) != "false 0" {
 		return ingest.Manifest{}, fmt.Errorf("worker did not exit successfully (state %q): %s", strings.TrimSpace(state), stderr)
 	}
+	// Collect Binwalk's signature log before exporting extracted files.
+	// A missing extraction directory is a normal possible outcome, and we
+	// need the scanner's diagnostics to distinguish it from a copy failure.
+	if _, e, err := docker.Run(workerCtx, "cp", name+":/scratch/binwalk.json", filepath.Join(stage, "binwalk.json")); err != nil {
+		return ingest.Manifest{}, fmt.Errorf("binwalk JSON provenance unavailable: %v: %s; %s", err, e, workerDiagnostics(stdout, stderr, nil))
+	}
+	logInfo, err := os.Lstat(filepath.Join(stage, "binwalk.json"))
+	if err != nil || !logInfo.Mode().IsRegular() || logInfo.Size() > maxSignatureLogBytes {
+		return ingest.Manifest{}, errors.New("binwalk JSON provenance absent, non-regular or oversized")
+	}
+	binwalkLog, err := os.ReadFile(filepath.Join(stage, "binwalk.json"))
+	if err != nil {
+		return ingest.Manifest{}, fmt.Errorf("read binwalk signature log: %w", err)
+	}
 	extracted := filepath.Join(stage, "extracted")
 	if err = os.Mkdir(extracted, 0700); err != nil {
 		return ingest.Manifest{}, err
 	}
 	if _, e, err := docker.Run(workerCtx, "cp", name+":/scratch/extracted/.", extracted); err != nil {
-		return ingest.Manifest{}, fmt.Errorf("no extractable content or docker cp failed: %v: %s", err, e)
-	}
-	if _, e, err := docker.Run(workerCtx, "cp", name+":/scratch/binwalk.json", filepath.Join(stage, "binwalk.json")); err != nil {
-		return ingest.Manifest{}, fmt.Errorf("binwalk JSON provenance unavailable: %v: %s", err, e)
-	}
-	info, err := os.Lstat(filepath.Join(stage, "binwalk.json"))
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxSignatureLogBytes {
-		return ingest.Manifest{}, errors.New("binwalk JSON provenance absent, non-regular or oversized")
+		return ingest.Manifest{}, fmt.Errorf("cannot export extracted files: %v: %s; %s", err, e, workerDiagnostics(stdout, stderr, binwalkLog))
 	}
 	if err = os.WriteFile(filepath.Join(stage, "stdout.log"), []byte(stdout), 0600); err != nil {
 		return ingest.Manifest{}, err
@@ -256,6 +263,21 @@ func dockerCreateArgs(name, image, input string) []string {
 		"--entrypoint=binwalk", image,
 		"--extract", "--threads=2", "--directory=/scratch/extracted", "--log=/scratch/binwalk.json", "/analysis/firmware.img",
 	}
+}
+
+// workerDiagnostics includes a bounded, control-character-escaped snapshot
+// of the local worker's output. It is used only on failure and never stored
+// in a success manifest. Source firmware may contain sensitive strings.
+func workerDiagnostics(stdout, stderr string, signatureLog []byte) string {
+	const maxExcerpt = 1200
+	excerpt := func(value string) string {
+		value = strings.TrimSpace(value)
+		if len(value) > maxExcerpt {
+			value = value[:maxExcerpt] + "... [truncated]"
+		}
+		return strconv.QuoteToASCII(value)
+	}
+	return "stdout=" + excerpt(stdout) + "; stderr=" + excerpt(stderr) + "; binwalk.json=" + excerpt(string(signatureLog))
 }
 
 func stageInput(src, dest string, expected ingest.Firmware) error {

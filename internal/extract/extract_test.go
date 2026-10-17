@@ -14,6 +14,7 @@ import (
 type fakeDocker struct {
 	calls  [][]string
 	failOn string
+	noFiles bool
 }
 
 func (f *fakeDocker) Run(_ context.Context, args ...string) (string, string, error) {
@@ -38,6 +39,9 @@ func (f *fakeDocker) Run(_ context.Context, args ...string) (string, string, err
 			panic("bad cp arguments")
 		}
 		if strings.HasSuffix(args[1], "/scratch/extracted/.") {
+			if f.noFiles {
+				return "", "Could not find the file /scratch/extracted/. in container", errors.New("exit status 1")
+			}
 			root := args[2]
 			if err := os.MkdirAll(filepath.Join(root, "squashfs-root/bin"), 0700); err != nil {
 				return "", "", err
@@ -141,6 +145,30 @@ func TestFailuresFailClosedAndCleanup(t *testing.T) {
 	}
 }
 
+func TestMissingExtractionReportsBinwalkEvidenceAndCleansUp(t *testing.T) {
+	firmware, dest := setup(t)
+	f := &fakeDocker{noFiles: true}
+	_, err := RunWith(context.Background(), Options{Firmware: firmware, OutputDir: dest}, f)
+	if err == nil {
+		t.Fatal("missing extraction incorrectly succeeded")
+	}
+	msg := err.Error()
+	for _, want := range []string{"cannot export extracted files", "signature found", "diagnostics", "results", "Could not find the file"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("missing diagnostic %q from: %s", want, msg)
+		}
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatal("failed extraction published a session")
+	}
+	if f.calls[len(f.calls)-1][0] != "rm" {
+		t.Fatal("failed extraction did not clean up container")
+	}
+	if !strings.HasSuffix(f.calls[4][1], "/scratch/binwalk.json") || !strings.HasSuffix(f.calls[5][1], "/scratch/extracted/.") {
+		t.Fatal("expected Binwalk diagnostics to be collected before extraction copy")
+	}
+}
+
 func TestRejectBeforeDocker(t *testing.T) {
 	firmware, dest := setup(t)
 	tests := []struct {
@@ -181,5 +209,12 @@ func TestDockerCreateArgsNoHostExecOrNetwork(t *testing.T) {
 	expectedLast := []string{"--extract", "--threads=2", "--directory=/scratch/extracted", "--log=/scratch/binwalk.json", "/analysis/firmware.img"}
 	if !reflect.DeepEqual(args[len(args)-len(expectedLast):], expectedLast) {
 		t.Fatalf("unexpected binwalk flags: %v", args)
+	}
+}
+
+func TestWorkerDiagnosticsEscapesControlCharactersAndBoundsSize(t *testing.T) {
+	got := workerDiagnostics(strings.Repeat("a", 4000)+"\x1b", "secret\nvalue", []byte("{}"))
+	if len(got) > 2900 || !strings.Contains(got, "[truncated]") || !strings.Contains(got, `secret\nvalue`) || strings.Contains(got, "\x1b") {
+		t.Fatalf("unsafe or unbounded diagnostics: %q", got)
 	}
 }
