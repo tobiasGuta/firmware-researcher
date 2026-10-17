@@ -27,11 +27,13 @@ const (
 // Manifest v1 is a deterministic inventory of bytes observed, not an attestation
 // that extraction was comprehensive or that source firmware is safe.
 type Manifest struct {
-	SchemaVersion    int      `json:"schema_version"`
-	Firmware         Firmware `json:"firmware"`
-	ExtractionStatus string   `json:"extraction_status"`
-	Files            []File   `json:"files"`
-	InventoryTotals  Totals   `json:"inventory_totals"`
+	SchemaVersion    int         `json:"schema_version"`
+	Firmware         Firmware    `json:"firmware"`
+	ExtractionStatus string      `json:"extraction_status"`
+	Files            []File      `json:"files"`
+	InventoryTotals  Totals      `json:"inventory_totals"`
+	Links            []Link      `json:"links,omitempty"`
+	Extraction       *Extraction `json:"extraction,omitempty"`
 }
 
 type Firmware struct {
@@ -48,13 +50,38 @@ type File struct {
 }
 
 type Totals struct {
-	Files int   `json:"files"`
-	Bytes int64 `json:"bytes"`
+	Files    int   `json:"files"`
+	Bytes    int64 `json:"bytes"`
+	Symlinks int   `json:"symlinks,omitempty"`
+}
+
+// Link records a symlink without resolving or following its target.
+type Link struct {
+	Path   string `json:"path"`
+	Target string `json:"target"`
+}
+
+// Extraction documents which isolated worker generated this inventory. A
+// successful extractor exit does not establish comprehensive firmware coverage.
+type Extraction struct {
+	Engine           string `json:"engine"`
+	Version          string `json:"version"`
+	ImageRef         string `json:"image_ref"`
+	ImageID          string `json:"image_id"`
+	SignatureLog     string `json:"signature_log"`
+	SignatureSHA256  string `json:"signature_sha256"`
+	StdoutLog        string `json:"stdout_log"`
+	StdoutSHA256     string `json:"stdout_sha256"`
+	StderrLog        string `json:"stderr_log"`
+	StderrSHA256     string `json:"stderr_sha256"`
+	WorkerNetwork    string `json:"worker_network"`
+	CoverageVerified bool   `json:"coverage_verified"`
 }
 
 type Options struct {
-	FirmwarePath  string
-	ExtractedRoot string
+	FirmwarePath   string
+	ExtractedRoot  string
+	RecordSymlinks bool // reserved for isolated extraction output; never follows targets
 }
 
 func Generate(opts Options) (Manifest, error) {
@@ -98,7 +125,26 @@ func Generate(opts Options) (Manifest, error) {
 			return nil
 		}
 		if d.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink rejected: %s", path)
+			if !opts.RecordSymlinks {
+				return fmt.Errorf("symlink rejected: %s", path)
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil || !validRelative(rel) {
+				return fmt.Errorf("invalid symlink path: %s", path)
+			}
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			if len(target) > 4096 {
+				return fmt.Errorf("symlink target too long: %s", rel)
+			}
+			if result.InventoryTotals.Symlinks >= MaxInventoryFiles {
+				return errors.New("symlink count limit exceeded")
+			}
+			result.Links = append(result.Links, Link{Path: filepath.ToSlash(rel), Target: target})
+			result.InventoryTotals.Symlinks++
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -114,7 +160,7 @@ func Generate(opts Options) (Manifest, error) {
 			return err
 		}
 		// WalkDir does not follow symlinks. Explicitly reject traversals too.
-		if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		if !validRelative(rel) {
 			return fmt.Errorf("path outside extraction root: %s", path)
 		}
 		hash, size, prefix, err := digestRegularFile(path, MaxFileBytes)
@@ -136,6 +182,7 @@ func Generate(opts Options) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("extraction inventory: %w", err)
 	}
 	sort.Slice(result.Files, func(i, j int) bool { return result.Files[i].Path < result.Files[j].Path })
+	sort.Slice(result.Links, func(i, j int) bool { return result.Links[i].Path < result.Links[j].Path })
 	result.ExtractionStatus = "externally_supplied_unverified"
 	return result, nil
 }
@@ -227,4 +274,8 @@ func WriteNew(path string, m Manifest) error {
 		return fmt.Errorf("cannot create output (already exists or unsupported filesystem): %w", err)
 	}
 	return nil
+}
+
+func validRelative(rel string) bool {
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
