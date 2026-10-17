@@ -273,7 +273,7 @@ func dockerCreateArgs(name, image, input string) []string {
 		"--workdir=/scratch", "--env=BINWALK_RM_EXTRACTION_SYMLINK=1",
 		// :Z labels ONLY the private staged firmware copy on SELinux systems.
 		"--volume=" + input + ":/analysis/firmware.img:ro,Z",
-		"--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1",
+		"--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1", "--log-opt=compress=false",
 		"--entrypoint=/bin/sh", image, "-c", workerScript,
 	}
 }

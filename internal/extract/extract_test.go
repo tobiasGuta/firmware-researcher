@@ -120,6 +120,11 @@ func TestExtractEndToEndWithFakeDocker(t *testing.T) {
 			t.Errorf("create missing %q: %s", want, create)
 		}
 	}
+	// Docker's local logger enables rotation compression by default.
+	// A single log file is legal only when compression is explicitly off.
+	if !strings.Contains(create, "--log-driver=local --log-opt=max-size=1m --log-opt=max-file=1 --log-opt=compress=false") {
+		t.Fatal("unsupported Docker local logging options: " + create)
+	}
 	if strings.Contains(create, "--privileged") || strings.Contains(create, "--matryoshka") {
 		t.Fatal("unexpected privilege or recursion")
 	}
