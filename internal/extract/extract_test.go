@@ -31,9 +31,13 @@ func (f *fakeDocker) Run(_ context.Context, args ...string) (string, string, err
 	case "create":
 		return "fake-container-id\n", "", nil
 	case "start":
+		return "fake-container-id\n", "", nil
+	case "exec":
+		return "0\n", "", nil
+	case "logs":
 		return "signature found\n", "diagnostics\n", nil
 	case "inspect":
-		return "false 0\n", "", nil
+		return "true 0\n", "", nil
 	case "cp":
 		if len(args) != 3 {
 			panic("bad cp arguments")
@@ -107,11 +111,11 @@ func TestExtractEndToEndWithFakeDocker(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dest, "firmware.img")); !os.IsNotExist(err) {
 		t.Fatal("firmware staging copy persisted")
 	}
-	if len(fake.calls) != 7 {
-		t.Fatalf("expected image/create/start/inspect/cp/cp/rm; got %d: %+v", len(fake.calls), fake.calls)
+	if len(fake.calls) != 9 {
+		t.Fatalf("expected image/create/start/exec/inspect/logs/cp/cp/rm; got %d: %+v", len(fake.calls), fake.calls)
 	}
 	create := strings.Join(fake.calls[1], " ")
-	for _, want := range []string{"--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64", "--memory=1536m", "--tmpfs=/scratch:rw", "--user ", ":/analysis/firmware.img:ro,Z", "--extract", "--threads=2"} {
+	for _, want := range []string{"--network=none", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--pids-limit=64", "--memory=1536m", "--tmpfs=/scratch:rw", "--user ", ":/analysis/firmware.img:ro,Z", "--extract", "--threads=2", "--entrypoint=/bin/sh", "--log-driver=local"} {
 		if !strings.Contains(create, want) {
 			t.Errorf("create missing %q: %s", want, create)
 		}
@@ -164,7 +168,7 @@ func TestMissingExtractionReportsBinwalkEvidenceAndCleansUp(t *testing.T) {
 	if f.calls[len(f.calls)-1][0] != "rm" {
 		t.Fatal("failed extraction did not clean up container")
 	}
-	if !strings.HasSuffix(f.calls[4][1], "/scratch/binwalk.json") || !strings.HasSuffix(f.calls[5][1], "/scratch/extracted/.") {
+	if !strings.HasSuffix(f.calls[6][1], "/scratch/binwalk.json") || !strings.HasSuffix(f.calls[7][1], "/scratch/extracted/.") {
 		t.Fatal("expected Binwalk diagnostics to be collected before extraction copy")
 	}
 }
@@ -206,7 +210,7 @@ func TestDockerCreateArgsNoHostExecOrNetwork(t *testing.T) {
 	if strings.Join(args, " ") == "" {
 		t.Fatal("empty")
 	}
-	expectedLast := []string{"--extract", "--threads=2", "--directory=/scratch/extracted", "--log=/scratch/binwalk.json", "/analysis/firmware.img"}
+	expectedLast := []string{"-c", workerScript}
 	if !reflect.DeepEqual(args[len(args)-len(expectedLast):], expectedLast) {
 		t.Fatalf("unexpected binwalk flags: %v", args)
 	}
@@ -216,5 +220,16 @@ func TestWorkerDiagnosticsEscapesControlCharactersAndBoundsSize(t *testing.T) {
 	got := workerDiagnostics(strings.Repeat("a", 4000)+"\x1b", "secret\nvalue", []byte("{}"))
 	if len(got) > 2900 || !strings.Contains(got, "[truncated]") || !strings.Contains(got, `secret\nvalue`) || strings.Contains(got, "\x1b") {
 		t.Fatalf("unsafe or unbounded diagnostics: %q", got)
+	}
+}
+
+func TestWaitForWorkerRequiresRunningSupervisor(t *testing.T) {
+	f := &fakeDocker{}
+	status, err := waitForWorker(context.Background(), f, "worker")
+	if err != nil || status != 0 {
+		t.Fatalf("expected worker result zero, got %d %v", status, err)
+	}
+	if len(f.calls) != 2 || f.calls[0][0] != "exec" || f.calls[1][0] != "inspect" {
+		t.Fatalf("unexpected polling: %v", f.calls)
 	}
 }

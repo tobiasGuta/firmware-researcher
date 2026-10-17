@@ -78,6 +78,14 @@ func Run(ctx context.Context, opts Options) (ingest.Manifest, error) {
 	return RunWith(ctx, opts, Docker{})
 }
 
+// Binwalk's output lives on Docker tmpfs. A stopped container loses this mount,
+// so a fixed (non-user-controlled) supervisor keeps the worker alive until the
+// host has exported the evidence. This does not grant an AI agent shell access.
+const workerScript = "binwalk --extract --threads=2 --directory=/scratch/extracted --log=/scratch/binwalk.json /analysis/firmware.img\n" +
+	"status=$?\n" +
+	"printf '%s\\n' \"$status\" > /scratch/worker-exit-code\n" +
+	"exec sleep 1200\n"
+
 // RunWith is injectable so the Docker execution contract can be tested without
 // running untrusted tooling or requiring a daemon in ordinary Go unit tests.
 func RunWith(ctx context.Context, opts Options, docker Runner) (ingest.Manifest, error) {
@@ -166,16 +174,21 @@ func RunWith(ctx context.Context, opts Options, docker Runner) (ingest.Manifest,
 		defer cancel()
 		_, _, _ = docker.Run(cleanupCtx, "rm", "-f", name)
 	}()
-	stdout, stderr, err := docker.Run(workerCtx, "start", "--attach", name)
-	if err != nil {
-		return ingest.Manifest{}, fmt.Errorf("binwalk worker failed or timed out: %v: %s", err, stderr)
+	// Detached start keeps the scratch tmpfs mounted. The hardcoded supervisor
+	// executes Binwalk once, records its exit code, then waits for our cleanup.
+	if _, e, err := docker.Run(workerCtx, "start", name); err != nil {
+		return ingest.Manifest{}, fmt.Errorf("cannot start Binwalk worker: %v: %s", err, e)
 	}
-	state, stateErr, err := docker.Run(workerCtx, "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name)
+	status, err := waitForWorker(workerCtx, docker, name)
 	if err != nil {
-		return ingest.Manifest{}, fmt.Errorf("cannot verify worker exit status: %v: %s", err, stateErr)
+		return ingest.Manifest{}, err
 	}
-	if strings.TrimSpace(state) != "false 0" {
-		return ingest.Manifest{}, fmt.Errorf("worker did not exit successfully (state %q): %s", strings.TrimSpace(state), stderr)
+	stdout, stderr, err := docker.Run(workerCtx, "logs", name)
+	if err != nil {
+		return ingest.Manifest{}, fmt.Errorf("cannot collect Binwalk diagnostics: %w", err)
+	}
+	if status != 0 {
+		return ingest.Manifest{}, fmt.Errorf("binwalk exited with code %d: %s", status, workerDiagnostics(stdout, stderr, nil))
 	}
 	// Collect Binwalk's signature log before exporting extracted files.
 	// A missing extraction directory is a normal possible outcome, and we
@@ -260,8 +273,42 @@ func dockerCreateArgs(name, image, input string) []string {
 		"--workdir=/scratch", "--env=BINWALK_RM_EXTRACTION_SYMLINK=1",
 		// :Z labels ONLY the private staged firmware copy on SELinux systems.
 		"--volume=" + input + ":/analysis/firmware.img:ro,Z",
-		"--entrypoint=binwalk", image,
-		"--extract", "--threads=2", "--directory=/scratch/extracted", "--log=/scratch/binwalk.json", "/analysis/firmware.img",
+		"--log-driver=local", "--log-opt=max-size=1m", "--log-opt=max-file=1",
+		"--entrypoint=/bin/sh", image, "-c", workerScript,
+	}
+}
+
+// waitForWorker polls only a fixed, supervisor-created exit-code file.
+// The process must stay alive to preserve the tmpfs until evidence is copied.
+// An unexpectedly exited supervisor is an error, not a successful extraction.
+func waitForWorker(ctx context.Context, docker Runner, name string) (int, error) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		out, _, err := docker.Run(ctx, "exec", name, "cat", "/scratch/worker-exit-code")
+		if err == nil {
+			status, parseErr := strconv.Atoi(strings.TrimSpace(out))
+			if parseErr != nil || status < 0 || status > 255 {
+				return 0, errors.New("invalid Binwalk supervisor exit marker")
+			}
+			state, diagnostic, stateErr := docker.Run(ctx, "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name)
+			if stateErr != nil || strings.TrimSpace(state) != "true 0" {
+				return 0, fmt.Errorf("Binwalk supervisor stopped before evidence export: state=%q err=%v: %s", strings.TrimSpace(state), stateErr, diagnostic)
+			}
+			return status, nil
+		}
+		state, diagnostic, stateErr := docker.Run(ctx, "inspect", "--format", "{{.State.Running}} {{.State.ExitCode}}", name)
+		if stateErr != nil {
+			return 0, fmt.Errorf("cannot inspect Binwalk supervisor: %v: %s", stateErr, diagnostic)
+		}
+		if strings.TrimSpace(state) != "true 0" {
+			return 0, fmt.Errorf("Binwalk supervisor exited without a completion marker: %s", strings.TrimSpace(state))
+		}
+		select {
+		case <-ctx.Done():
+			return 0, fmt.Errorf("Binwalk timed out or was cancelled: %w", ctx.Err())
+		case <-ticker.C:
+		}
 	}
 }
 
