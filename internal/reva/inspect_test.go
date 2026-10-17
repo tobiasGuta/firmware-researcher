@@ -202,3 +202,59 @@ func TestFullIndexRejectsInconsistentPages(t *testing.T) {
 		})
 	}
 }
+
+func selectedBlockCFGFixture(t *testing.T, blocks string) string {
+	t.Helper()
+	return toolFixture(t, `{"programPath":"/uhttpd","function":"FUN_00014e8c","functionAddress":"0x00014e8c","truncated":false,"blocks":`+blocks+`}`)
+}
+
+func TestInspectSelectedNonEntryBlock(t *testing.T) {
+	c := rpcFixture(t,
+		`{"tools":[{"name":"get-functions"},{"name":"get-function-cfg"},{"name":"get-pcode"}]}`,
+		indexFixture(t, 1, 319),
+		selectedBlockCFGFixture(t, `[{"minAddress":"0x00014e8c","maxAddress":"0x00014eab"},{"minAddress":"0x00014f00","maxAddress":"0x00014f23"}]`),
+		toolFixture(t, `{"programPath":"/uhttpd","scope":"basic-block","resolvedAddress":"0x00014f18","scopeStart":"0x00014f00","scopeEnd":"0x00014f23","truncated":false,"instructions":[]}`),
+	)
+	got, err := inspectFunctionPagedAt(c, overviewFixture(), "FUN_00014e8c", false, "0x14f18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PcodeRequestedAddress != "0x00014f18" || !got.Overview.IdentityVerified || len(got.FunctionCFG) == 0 || len(got.PCode) == 0 {
+		t.Fatalf("wrong bounded block evidence: %+v", got)
+	}
+}
+
+func TestInspectSelectedBlockRejectsBadCFGOrPCode(t *testing.T) {
+	tests := []struct {
+		name, blocks, pcode string
+	}{
+		{"no matching CFG block", `[{"minAddress":"0x00014e8c","maxAddress":"0x00014eab"}]`, `{"programPath":"/uhttpd","scope":"basic-block","resolvedAddress":"0x00014f18","scopeStart":"0x00014f00","scopeEnd":"0x00014f23","truncated":false}`},
+		{"malformed CFG bounds", `[{"minAddress":"wrong","maxAddress":"0x00014f23"}]`, `{"programPath":"/uhttpd","scope":"basic-block","resolvedAddress":"0x00014f18","scopeStart":"0x00014f00","scopeEnd":"0x00014f23","truncated":false}`},
+		{"wrong P-code block", `[{"minAddress":"0x00014f00","maxAddress":"0x00014f23"}]`, `{"programPath":"/uhttpd","scope":"basic-block","resolvedAddress":"0x00014f18","scopeStart":"0x00014f04","scopeEnd":"0x00014f23","truncated":false}`},
+		{"wrong P-code address", `[{"minAddress":"0x00014f00","maxAddress":"0x00014f23"}]`, `{"programPath":"/uhttpd","scope":"basic-block","resolvedAddress":"0x00014f14","scopeStart":"0x00014f00","scopeEnd":"0x00014f23","truncated":false}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := rpcFixture(t,
+				`{"tools":[{"name":"get-functions"},{"name":"get-function-cfg"},{"name":"get-pcode"}]}`,
+				indexFixture(t, 1, 319),
+				selectedBlockCFGFixture(t, tc.blocks),
+				toolFixture(t, tc.pcode),
+			)
+			if _, err := inspectFunctionPagedAt(c, overviewFixture(), "FUN_00014e8c", false, "0x14f18"); err == nil {
+				t.Fatal("accepted inconsistent block evidence")
+			}
+		})
+	}
+}
+
+func TestPcodeAddressValidation(t *testing.T) {
+	for _, raw := range []string{"", "14f18", "0xZZ", "0x1\n", "0x123456789123456789", "0x"} {
+		if _, err := parsePcodeAddress(raw); err == nil {
+			t.Errorf("accepted %q", raw)
+		}
+	}
+	if n, err := parsePcodeAddress("0x00014f18"); err != nil || n != 0x14f18 {
+		t.Fatalf("bad accepted address %x %v", n, err)
+	}
+}

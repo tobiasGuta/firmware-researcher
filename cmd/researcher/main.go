@@ -101,8 +101,9 @@ func run(ctx context.Context, args []string) error {
 		timeout := flags.Duration("timeout", 5*time.Minute, "ReVa session deadline (1s-15m)")
 		function := flags.String("function", "", "optional exact Ghidra function name or entry address (reva-inspect only)")
 		fullIndex := flags.Bool("full-index", false, "collect up to 512 functions in pages of 64 (reva-inspect only)")
+		pcodeAddress := flags.String("pcode-address", "", "inspect the basic block containing this address (requires reva-inspect --function)")
 		var callSites callsiteFlags
-		flags.Var(&callSites, "callsite", "machine call instruction address (repeat up to 4, reva-call only)")
+		flags.Var(&callSites, "callsite", "machine call instruction address (repeat 1-4 times, reva-call only)")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -129,18 +130,22 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("--callsite is only supported by reva-call")
 		}
 		if args[0] == "reva-call" {
-			if *fullIndex || *function != "" {
-				return errors.New("--full-index and --function are not supported by reva-call")
+			if *fullIndex || *function != "" || *pcodeAddress != "" {
+				return errors.New("--full-index, --function and --pcode-address are not supported by reva-call")
 			}
 			evidence, err := reva.QueryCallEvidence(ctx, target, *launcher, callSites, *timeout)
-			if err != nil { return err }
-			if err := reva.WriteCallEvidenceNew(*out, evidence); err != nil { return err }
+			if err != nil {
+				return err
+			}
+			if err := reva.WriteCallEvidenceNew(*out, evidence); err != nil {
+				return err
+			}
 			fmt.Printf("component: %s\nsha256 identity verified: %t\ncall sites: %d\nevidence: %s\n", target.Path, evidence.Overview.IdentityVerified, len(evidence.Boundaries), *out)
 			return nil
 		}
 		if args[0] == "reva-triage" {
-			if *function != "" || *fullIndex {
-				return errors.New("--function and --full-index are not supported by reva-triage")
+			if *function != "" || *fullIndex || *pcodeAddress != "" {
+				return errors.New("--function, --full-index and --pcode-address are not supported by reva-triage")
 			}
 			evidence, err := reva.QueryStringTriage(ctx, target, *launcher, *timeout)
 			if err != nil {
@@ -153,7 +158,7 @@ func run(ctx context.Context, args []string) error {
 			return nil
 		}
 		if args[0] == "reva-inspect" {
-			inspection, err := reva.QueryInspection(ctx, target, *launcher, *function, *timeout, *fullIndex)
+			inspection, err := reva.QueryInspectionAt(ctx, target, *launcher, *function, *timeout, *fullIndex, *pcodeAddress)
 			if err != nil {
 				return err
 			}
@@ -164,6 +169,9 @@ func run(ctx context.Context, args []string) error {
 			if *function != "" {
 				fmt.Printf("inspected function: %s\n", *function)
 			}
+			if *pcodeAddress != "" {
+				fmt.Printf("P-code block address: %s\n", inspection.PcodeRequestedAddress)
+			}
 			fmt.Printf("evidence: %s\n", *out)
 			return nil
 		}
@@ -172,6 +180,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if *fullIndex {
 			return errors.New("--full-index requires reva-inspect")
+		}
+		if *pcodeAddress != "" {
+			return errors.New("--pcode-address requires reva-inspect --function")
 		}
 		evidence, err := reva.Query(ctx, target, *launcher, *timeout)
 		if err != nil {
@@ -187,13 +198,15 @@ func run(ctx context.Context, args []string) error {
 	}
 }
 
-// callsiteFlags is a small operator-provided set; validation is fail-closed
-// before the disposable Ghidra project starts.
+// callsiteFlags records only the operator-supplied addresses. Validation is
+// performed before the headless ReVa project is started.
 type callsiteFlags []string
 
 func (f *callsiteFlags) String() string { return strings.Join(*f, ",") }
 func (f *callsiteFlags) Set(value string) error {
-	if len(*f) >= 4 { return errors.New("at most four --callsite values") }
+	if len(*f) >= 4 {
+		return errors.New("at most four --callsite values")
+	}
 	*f = append(*f, value)
 	return nil
 }
@@ -203,7 +216,7 @@ func usage() string {
   researcher ingest --firmware IMAGE --out MANIFEST.json [--extracted DIRECTORY]
   researcher extract --firmware IMAGE --out-dir NEW_DIRECTORY [--image IMAGE] [--timeout 3m]
   researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
-  researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--full-index] [--reva-bin mcp-reva] [--timeout 5m]
+  researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--pcode-address 0xADDRESS] [--full-index] [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-triage --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
   researcher reva-call --session EXTRACTION_DIR --name ELF_BASENAME --callsite 0xADDRESS [--callsite 0xADDRESS ...] --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
 

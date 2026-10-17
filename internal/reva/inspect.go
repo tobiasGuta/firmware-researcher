@@ -13,12 +13,13 @@ import (
 // Inspection preserves the verified executable identity and the exact bounded
 // ReVa responses, including any truncation, instead of inferring a bug.
 type Inspection struct {
-	SchemaVersion     int             `json:"schema_version"`
-	Overview          Overview        `json:"verified_overview"`
-	FunctionIndex     json.RawMessage `json:"function_index"`
-	RequestedFunction string          `json:"requested_function,omitempty"`
-	FunctionCFG       json.RawMessage `json:"function_cfg,omitempty"`
-	PCode             json.RawMessage `json:"basic_block_pcode,omitempty"`
+	SchemaVersion         int             `json:"schema_version"`
+	Overview              Overview        `json:"verified_overview"`
+	FunctionIndex         json.RawMessage `json:"function_index"`
+	RequestedFunction     string          `json:"requested_function,omitempty"`
+	PcodeRequestedAddress string          `json:"pcode_requested_address,omitempty"`
+	FunctionCFG           json.RawMessage `json:"function_cfg,omitempty"`
+	PCode                 json.RawMessage `json:"basic_block_pcode,omitempty"`
 }
 
 const maxFunctions = 64
@@ -27,16 +28,28 @@ const maxCFGBlocks = 64
 const maxPcodeInstructions = 32
 const maxPcodeOps = 256
 
-// QueryInspection lists at most 64 functions in a newly analyzed disposable
-// project; optionally requests one function CFG and one entry basic-block
-// P-code excerpt. No execution, scripts, or arbitrary MCP tool calls.
+// QueryInspection lists functions, optionally requesting a function CFG and
+// a bounded P-code basic block. The explicit P-code address must be inside
+// a block returned by the selected function's CFG.
 func QueryInspection(ctx context.Context, target Target, launcher, function string, timeout time.Duration, fullIndex bool) (Inspection, error) {
+	return QueryInspectionAt(ctx, target, launcher, function, timeout, fullIndex, "")
+}
+
+func QueryInspectionAt(ctx context.Context, target Target, launcher, function string, timeout time.Duration, fullIndex bool, blockAddress string) (Inspection, error) {
 	if len(function) > 160 || strings.ContainsAny(function, "\r\n\x00") {
 		return Inspection{}, errors.New("function identifier is too long or contains controls")
 	}
+	if blockAddress != "" {
+		if function == "" {
+			return Inspection{}, errors.New("--pcode-address requires --function")
+		}
+		if _, err := parsePcodeAddress(blockAddress); err != nil {
+			return Inspection{}, err
+		}
+	}
 	var result Inspection
 	err := withSession(ctx, target, launcher, timeout, func(c *client, ov Overview) error {
-		inspected, err := inspectFunctionPaged(c, ov, function, fullIndex)
+		inspected, err := inspectFunctionPagedAt(c, ov, function, fullIndex, blockAddress)
 		if err != nil {
 			return err
 		}
@@ -46,11 +59,26 @@ func QueryInspection(ctx context.Context, target Target, launcher, function stri
 	return result, err
 }
 
+func parsePcodeAddress(raw string) (uint64, error) {
+	if !strings.HasPrefix(raw, "0x") || len(raw) < 3 || len(raw) > 18 {
+		return 0, fmt.Errorf("invalid hexadecimal P-code address %q", raw)
+	}
+	value, err := strconv.ParseUint(raw[2:], 16, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid hexadecimal P-code address %q", raw)
+	}
+	return value, nil
+}
+
 func inspectFunction(c *client, overview Overview, function string) (Inspection, error) {
 	return inspectFunctionPaged(c, overview, function, false)
 }
 
 func inspectFunctionPaged(c *client, overview Overview, function string, fullIndex bool) (Inspection, error) {
+	return inspectFunctionPagedAt(c, overview, function, fullIndex, "")
+}
+
+func inspectFunctionPagedAt(c *client, overview Overview, function string, fullIndex bool, blockAddress string) (Inspection, error) {
 	program := overview.ReVaProgramPath
 	if program == "" || !overview.IdentityVerified {
 		return Inspection{}, errors.New("unverified ReVa program")
@@ -93,14 +121,56 @@ func inspectFunctionPaged(c *client, overview Overview, function string, fullInd
 	if name := getString(cfg, "function"); function != name && !strings.EqualFold(function, address) {
 		return Inspection{}, fmt.Errorf("requested function %q resolved to unexpected %q at %q", function, name, address)
 	}
-	// P-code uses Ghidra's returned entry address, not an invented offset.
-	pcode, err := c.tool("get-pcode", map[string]any{"programPath": program, "target": address,
+	// By default inspect the function's entry basic block; an explicit
+	// instruction address must belong to a returned CFG basic block.
+	targetAddress := address
+	var selectedStart, selectedEnd uint64
+	if blockAddress != "" {
+		requested, err := parsePcodeAddress(blockAddress)
+		if err != nil {
+			return Inspection{}, err
+		}
+		var blocks []struct {
+			MinAddress string `json:"minAddress"`
+			MaxAddress string `json:"maxAddress"`
+		}
+		if err := json.Unmarshal(cfg["blocks"], &blocks); err != nil {
+			return Inspection{}, errors.New("CFG lacks blocks for P-code address verification")
+		}
+		found := false
+		for _, block := range blocks {
+			start, errStart := parsePcodeAddress(block.MinAddress)
+			end, errEnd := parsePcodeAddress(block.MaxAddress)
+			if errStart != nil || errEnd != nil || end < start {
+				return Inspection{}, errors.New("CFG contains invalid block address bounds")
+			}
+			if requested >= start && requested <= end {
+				if found {
+					return Inspection{}, errors.New("CFG has overlapping blocks at selected address")
+				}
+				found, selectedStart, selectedEnd = true, start, end
+			}
+		}
+		if !found {
+			return Inspection{}, errors.New("P-code address not in returned function CFG blocks; select a different function or address")
+		}
+		targetAddress = fmt.Sprintf("0x%08x", requested)
+		result.PcodeRequestedAddress = targetAddress
+	}
+	pcode, err := c.tool("get-pcode", map[string]any{"programPath": program, "target": targetAddress,
 		"scope": "basic-block", "maxInstructions": maxPcodeInstructions, "maxOps": maxPcodeOps})
 	if err != nil {
 		return Inspection{}, err
 	}
-	if getString(pcode, "programPath") != program || getString(pcode, "scope") != "basic-block" || !strings.EqualFold(getString(pcode, "resolvedAddress"), address) {
-		return Inspection{}, errors.New("P-code result does not correspond to selected CFG entry block")
+	if getString(pcode, "programPath") != program || getString(pcode, "scope") != "basic-block" || !sameHexAddress(getString(pcode, "resolvedAddress"), targetAddress) {
+		return Inspection{}, errors.New("P-code result does not correspond to selected CFG address")
+	}
+	if blockAddress != "" {
+		start, e1 := parsePcodeAddress(getString(pcode, "scopeStart"))
+		end, e2 := parsePcodeAddress(getString(pcode, "scopeEnd"))
+		if e1 != nil || e2 != nil || start != selectedStart || end != selectedEnd {
+			return Inspection{}, errors.New("P-code basic-block bounds do not match selected CFG block")
+		}
 	}
 	// Require truncation metadata; never infer completeness from a small page.
 	for _, row := range []map[string]json.RawMessage{cfg, pcode} {

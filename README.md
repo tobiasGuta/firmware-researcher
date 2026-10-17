@@ -147,24 +147,21 @@ Inspect `referencing_functions` for an address to pass to `reva-inspect --functi
 or that a vulnerability exists; it has no access to execution or arbitrary MCP
 functions. Strings without direct Ghidra references remain included as evidence.
 
+### Inspect a selected control-flow basic block
 
-### Bounded operator-selected ReVa call boundaries
+With `reva-inspect --function`, the optional `--pcode-address 0xADDRESS`
+requests bounded raw P-code for the basic block containing that instruction
+(rather than the default function entry block). The address must be contained
+in a returned block of the selected function's CFG. Both the ReVa returned
+address and the block range are checked against the CFG; mismatches fail
+closed. Output preserves `pcode_requested_address`, `function_cfg`,
+`basic_block_pcode`, and truncation metadata. This is static evidence, not
+a verified interprocedural data-flow result.
 
-\`reva-call\` verifies the extracted ELF against its manifest and Ghidra import
-hash, then requests only \`inspect-call-boundary\` for 1–4 explicit machine
-callsite addresses in one disposable ReVa session. Results retain the raw
-Ghidra High P-code arguments, target classification, callee return-site
-models, ambiguity and truncation metadata. These observations are *candidate*
-decompiler facts, not proven runtime argument mapping, execution, or flaws.
-
-\`\`\`bash
-./researcher reva-call \
+```bash
+./researcher reva-inspect \
   --session "$HOME/Research/IoTGoat/extraction-05" --name uhttpd \
+  --function FUN_00014e8c --pcode-address 0x00014f18 \
   --reva-bin "$REVA_BIN" \
-  --callsite 0x00014e9c --callsite 0x00014f18 \
-  --out "$HOME/Research/IoTGoat/reva-uhttpd-calls-01.json" --timeout 8m
-\`\`\`
-
-The selected sites come from the observed \`FUN_00014e8c\` CFG. No AI,
-unbounded lookup, arbitrary MCP tool access, target execution, or persistent
-Ghidra project is introduced.
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-call-block-01.json" --timeout 8m
+```
