@@ -105,3 +105,23 @@ Function analysis uses only the read-only `get-functions`, `get-function-cfg`
 and `get-pcode` MCP tools after the same verified import and overview checks.
 It doesn't decompile the whole executable, exercise the target, or identify
 vulnerabilities by itself. The Ghidra project remains disposable.
+
+### Full bounded ReVa function index
+
+The default `reva-inspect` output contains one 64-function page, which can
+consist mostly of PLT stubs. Use `--full-index` to collect **up to 512**
+functions from the same disposable Ghidra project. Each `get-functions`
+request is limited to 64. The merged `function_index` includes `pageCount`,
+`complete`, `truncated`, `totalCount`, and `nextStartIndex`, and does not
+claim that the index count equals Ghidra's overview function count.
+
+```bash
+./researcher reva-inspect \
+  --session "$HOME/Research/IoTGoat/extraction-05" --name uhttpd \
+  --reva-bin "$REVA_BIN" --full-index \
+  --out "$HOME/Research/IoTGoat/reva-uhttpd-index-full-01.json" --timeout 8m
+```
+
+Review the function names and addresses in `function_index.functions`, then
+select an identified application function with `--function` for bounded CFG
+and basic-block P-code. PLT stubs alone are not application logic.

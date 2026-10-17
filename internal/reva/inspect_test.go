@@ -107,3 +107,98 @@ func TestInspectRejectsImpossiblePagination(t *testing.T) {
 		t.Fatal("accepted inconsistent index")
 	}
 }
+
+func pagedIndexFixture(t *testing.T, start, count, total int) string {
+	t.Helper()
+	rows := make([]map[string]any, count)
+	for i := range rows {
+		rows[i] = map[string]any{
+			"name":        fmt.Sprintf("function_%03d", start+i),
+			"address":     fmt.Sprintf("0x%08x", 0x12000+4*(start+i)),
+			"sizeInBytes": 36,
+		}
+	}
+	b, err := json.Marshal(map[string]any{
+		"functions": rows, "actualCount": count, "totalCount": total,
+		"startIndex": start, "nextStartIndex": start + count,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toolFixture(t, string(b))
+}
+
+func TestFullFunctionIndexCollectsMultiplePages(t *testing.T) {
+	c := rpcFixture(t,
+		pagedIndexFixture(t, 0, 64, 130),
+		pagedIndexFixture(t, 64, 64, 130),
+		pagedIndexFixture(t, 128, 2, 130),
+	)
+	result, err := readFunctionIndex(c, "/uhttpd", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		Functions      []struct{ Name string } `json:"functions"`
+		ActualCount    int                     `json:"actualCount"`
+		TotalCount     int                     `json:"totalCount"`
+		NextStartIndex int                     `json:"nextStartIndex"`
+		PageCount      int                     `json:"pageCount"`
+		Complete       bool                    `json:"complete"`
+		Truncated      bool                    `json:"truncated"`
+	}
+	if err := json.Unmarshal(result, &index); err != nil {
+		t.Fatal(err)
+	}
+	if index.ActualCount != 130 || len(index.Functions) != 130 || index.TotalCount != 130 ||
+		index.NextStartIndex != 130 || index.PageCount != 3 || !index.Complete || index.Truncated ||
+		index.Functions[129].Name != "function_129" {
+		t.Fatalf("incorrect assembled pages: %+v", index)
+	}
+}
+
+func TestFullIndexStopsAt512WithExplicitTruncation(t *testing.T) {
+	responses := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		responses = append(responses, pagedIndexFixture(t, 64*i, 64, 700))
+	}
+	c := rpcFixture(t, responses...)
+	result, err := readFunctionIndex(c, "/uhttpd", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		ActualCount    int  `json:"actualCount"`
+		NextStartIndex int  `json:"nextStartIndex"`
+		PageCount      int  `json:"pageCount"`
+		Complete       bool `json:"complete"`
+		Truncated      bool `json:"truncated"`
+	}
+	if err := json.Unmarshal(result, &index); err != nil {
+		t.Fatal(err)
+	}
+	if index.ActualCount != 512 || index.NextStartIndex != 512 || index.PageCount != 8 ||
+		index.Complete || !index.Truncated {
+		t.Fatalf("bad capped pagination: %+v", index)
+	}
+}
+
+func TestFullIndexRejectsInconsistentPages(t *testing.T) {
+	tests := []struct {
+		name   string
+		second string
+	}{
+		{"total changed", pagedIndexFixture(t, 64, 1, 131)},
+		{"wrong offset", pagedIndexFixture(t, 63, 1, 130)},
+		{"empty unfinished page", pagedIndexFixture(t, 64, 0, 130)},
+		{"duplicate address", pagedIndexFixture(t, 0, 1, 130)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := rpcFixture(t, pagedIndexFixture(t, 0, 64, 130), tt.second)
+			if _, err := readFunctionIndex(c, "/uhttpd", true); err == nil {
+				t.Fatal("accepted inconsistent function index")
+			}
+		})
+	}
+}

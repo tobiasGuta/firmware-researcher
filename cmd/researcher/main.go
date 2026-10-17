@@ -100,6 +100,7 @@ func run(ctx context.Context, args []string) error {
 		launcher := flags.String("reva-bin", "mcp-reva", "trusted local mcp-reva executable")
 		timeout := flags.Duration("timeout", 5*time.Minute, "ReVa session deadline (1s-15m)")
 		function := flags.String("function", "", "optional exact Ghidra function name or entry address (reva-inspect only)")
+		fullIndex := flags.Bool("full-index", false, "collect up to 512 functions in pages of 64 (reva-inspect only)")
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -123,7 +124,7 @@ func run(ctx context.Context, args []string) error {
 			return errors.New("analysis output must be outside extracted firmware directory")
 		}
 		if args[0] == "reva-inspect" {
-			inspection, err := reva.QueryInspection(ctx, target, *launcher, *function, *timeout)
+			inspection, err := reva.QueryInspection(ctx, target, *launcher, *function, *timeout, *fullIndex)
 			if err != nil {
 				return err
 			}
@@ -139,6 +140,9 @@ func run(ctx context.Context, args []string) error {
 		}
 		if *function != "" {
 			return errors.New("--function requires reva-inspect")
+		}
+		if *fullIndex {
+			return errors.New("--full-index requires reva-inspect")
 		}
 		evidence, err := reva.Query(ctx, target, *launcher, *timeout)
 		if err != nil {
@@ -159,7 +163,7 @@ func usage() string {
   researcher ingest --firmware IMAGE --out MANIFEST.json [--extracted DIRECTORY]
   researcher extract --firmware IMAGE --out-dir NEW_DIRECTORY [--image IMAGE] [--timeout 3m]
   researcher reva-overview --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--reva-bin mcp-reva] [--timeout 5m]
-  researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--reva-bin mcp-reva] [--timeout 5m]
+  researcher reva-inspect --session EXTRACTION_DIR --name ELF_BASENAME --out NEW_JSON [--function GHIDRA_NAME_OR_ADDRESS] [--full-index] [--reva-bin mcp-reva] [--timeout 5m]
 
 Ingest is offline and read-only. Extract invokes an explicitly configured
 local Docker image containing pinned Binwalk v3.1.0. Extraction is non-recursive,
@@ -168,7 +172,7 @@ extracted firmware. Requires a trusted Docker daemon and operator-owned paths.
 An extractor's successful exit does not prove complete coverage of firmware.
 ReVa overview imports one manifest-verified ELF into a disposable local Ghidra
 project and invokes only import-file and get-program-overview through MCP.
-reva-inspect additionally lists one bounded page of functions and optionally
-inspects one CFG and one entry basic block of raw P-code. Truncation flags are
+reva-inspect lists one bounded page of functions by default, or up to 512 via
+--full-index (pages of 64), and optionally inspects one CFG and entry P-code. Truncation flags are
 retained. No AI, firmware execution, or persistent Ghidra project.`
 }
